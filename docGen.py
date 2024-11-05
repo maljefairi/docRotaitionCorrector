@@ -202,3 +202,54 @@ transform = transforms.Compose([
 # Create dataset and dataloader
 dataset = DocumentDataset('synthetic_documents', transform=transform)
 dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+
+# Define the CNN model
+class OrientationCNN(nn.Module):
+    def __init__(self):
+        super(OrientationCNN, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Conv2d(16, 32, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(32 * 56 * 56, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),  # Output layer for regression
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+model = OrientationCNN()
+
+# Define loss function and optimizer
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+num_epochs = 5
+
+for epoch in range(num_epochs):
+    running_loss = 0.0
+    total = 0
+
+    for images, angles in dataloader:
+        optimizer.zero_grad()
+
+        outputs = model(images)
+        loss = criterion(outputs.squeeze(), angles)
+        loss.backward()
+        optimizer.step()
+
+        # Statistics
+        running_loss += loss.item()
+        total += angles.size(0)
+
+    avg_loss = running_loss/total
+    print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}')
