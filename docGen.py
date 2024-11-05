@@ -163,7 +163,8 @@ class DocumentDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
-        return image, normalized_angle
+        # Convert to float32
+        return image.float(), torch.tensor(normalized_angle, dtype=torch.float32)
 
 # Generate synthetic documents
 doc_types = ['license', 'passport', 'a4']
@@ -240,6 +241,10 @@ for epoch in range(num_epochs):
     total = 0
 
     for images, angles in dataloader:
+        # Ensure both inputs and model are using float32
+        images = images.float()
+        angles = angles.float()
+        
         optimizer.zero_grad()
 
         outputs = model(images)
