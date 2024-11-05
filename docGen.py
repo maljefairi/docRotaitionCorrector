@@ -210,7 +210,7 @@ class STNOrientationModel(nn.Module):
     def __init__(self):
         super(STNOrientationModel, self).__init__()
         # Load pre-trained ResNet18 model
-        self.base_model = models.resnet18(pretrained=True)
+        self.base_model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
         
         # Spatial transformer localization-network
         self.localization = nn.Sequential(
@@ -219,12 +219,18 @@ class STNOrientationModel(nn.Module):
             nn.ReLU(True),
             nn.Conv2d(8, 10, kernel_size=5),
             nn.MaxPool2d(2, stride=2),
-            nn.ReLU(True)
+            nn.ReLU(True),
+            nn.Flatten()  # Add flatten layer to handle dimensions automatically
         )
+
+        # Calculate the output size of localization network
+        dummy_input = torch.zeros(1, 3, 224, 224)
+        dummy_output = self.localization(dummy_input)
+        loc_output_size = dummy_output.shape[1]
 
         # Regressor for the 3 * 2 affine matrix
         self.fc_loc = nn.Sequential(
-            nn.Linear(10 * 53 * 53, 32),
+            nn.Linear(loc_output_size, 32),
             nn.ReLU(True),
             nn.Linear(32, 6)
         )
@@ -243,7 +249,6 @@ class STNOrientationModel(nn.Module):
     # Spatial transformer network forward function
     def stn(self, x):
         xs = self.localization(x)
-        xs = xs.view(-1, 10 * 53 * 53)
         theta = self.fc_loc(xs)
         theta = theta.view(-1, 2, 3)
         
