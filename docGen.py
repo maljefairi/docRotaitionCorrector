@@ -113,28 +113,55 @@ def create_synthetic_document(text, language, doc_type='license'):
     img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
     return img_cv
 
-# Function to rotate and save images
-def rotate_and_save_image(img_array, angle, save_path):
+# Function to apply perspective transformation
+def apply_perspective_transform(img):
+    rows, cols, ch = img.shape
+    
+    # Original points
+    pts1 = np.float32([[0,0], [cols,0], [0,rows], [cols,rows]])
+    
+    # Perturbed points
+    margin = int(min(rows, cols) * 0.1)  # 10% margin
+    pts2 = pts1 + np.random.uniform(-margin, margin, pts1.shape).astype(np.float32)
+    
+    # Compute the perspective transform matrix
+    M = cv2.getPerspectiveTransform(pts1, pts2)
+    
+    # Apply the warp perspective
+    dst = cv2.warpPerspective(img, M, (cols, rows), borderValue=(255,255,255))
+    
+    return dst
+
+# Function to rotate, apply perspective transform, and save images
+def transform_and_save_image(img_array, angle, save_path):
+    # Rotate image
     rotated_img = Image.fromarray(cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB))
     rotated_img = rotated_img.rotate(angle, expand=True, fillcolor='white')
-    rotated_img.save(save_path)
+    rotated_img = np.array(rotated_img)
+    rotated_img = cv2.cvtColor(rotated_img, cv2.COLOR_RGB2BGR)
+    
+    # Apply perspective transform
+    transformed_img = apply_perspective_transform(rotated_img)
+    
+    # Save the transformed image
+    cv2.imwrite(save_path, transformed_img)
 
-# Generate synthetic documents and augment with rotations
+# Generate synthetic documents and augment with transformations
 doc_types = ['license', 'passport', 'a4']
-for doc_type in doc_types:
-    for i in range(100):
+for doc_type in tqdm(doc_types, desc='Processing document types'):
+    for i in tqdm(range(100), desc=f'Generating {doc_type} documents', leave=False):
         text, language = random.choice(sample_texts)
         img = create_synthetic_document(text, language, doc_type)
         base_filename = f'{language}_{doc_type}_{i}'
         # Save original image
         cv2.imwrite(f'synthetic_documents/{base_filename}_rot0.png', img)
         
-        # Generate rotations directly from the original image
+        # Generate transformations directly from the original image
         for j in range(10):
             angle = random.uniform(-180, 180)
             angle_str = f"{angle:.2f}"
             save_path = f'synthetic_documents/{base_filename}_rot{angle_str}.png'
-            rotate_and_save_image(img, angle, save_path)
+            transform_and_save_image(img, angle, save_path)
 
 # Custom Dataset
 class DocumentDataset(Dataset):
@@ -178,15 +205,61 @@ transform = transforms.Compose([
 dataset = DocumentDataset('synthetic_documents', transform=transform)
 dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-# Load pre-trained ResNet18 model
-model = models.resnet18(pretrained=True)
+# Define the model with Spatial Transformer Network
+class STNOrientationModel(nn.Module):
+    def __init__(self):
+        super(STNOrientationModel, self).__init__()
+        # Load pre-trained ResNet18 model
+        self.base_model = models.resnet18(pretrained=True)
+        
+        # Spatial transformer localization-network
+        self.localization = nn.Sequential(
+            nn.Conv2d(3, 8, kernel_size=7),
+            nn.MaxPool2d(2, stride=2),
+            nn.ReLU(True),
+            nn.Conv2d(8, 10, kernel_size=5),
+            nn.MaxPool2d(2, stride=2),
+            nn.ReLU(True)
+        )
 
-# Modify the final layer to output sine and cosine
-model.fc = nn.Sequential(
-    nn.Linear(model.fc.in_features, 128),
-    nn.ReLU(),
-    nn.Linear(128, 2),  # Output sine and cosine
-)
+        # Regressor for the 3 * 2 affine matrix
+        self.fc_loc = nn.Sequential(
+            nn.Linear(10 * 53 * 53, 32),
+            nn.ReLU(True),
+            nn.Linear(32, 6)
+        )
+        
+        # Initialize the weights/bias with identity transformation
+        self.fc_loc[2].weight.data.zero_()
+        self.fc_loc[2].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
+        
+        # Modify the final layer to output sine and cosine
+        self.base_model.fc = nn.Sequential(
+            nn.Linear(self.base_model.fc.in_features, 128),
+            nn.ReLU(),
+            nn.Linear(128, 2),  # Output sine and cosine
+        )
+
+    # Spatial transformer network forward function
+    def stn(self, x):
+        xs = self.localization(x)
+        xs = xs.view(-1, 10 * 53 * 53)
+        theta = self.fc_loc(xs)
+        theta = theta.view(-1, 2, 3)
+        
+        grid = nn.functional.affine_grid(theta, x.size(), align_corners=False)
+        x = nn.functional.grid_sample(x, grid, align_corners=False)
+        
+        return x
+
+    def forward(self, x):
+        # Transform the input
+        x = self.stn(x)
+        # Forward pass through the base model
+        x = self.base_model(x)
+        return x
+
+model = STNOrientationModel()
 
 # Define loss function and optimizer
 criterion = nn.MSELoss()
@@ -195,12 +268,13 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 # Training loop
 num_epochs = 10
 
-for epoch in range(num_epochs):
+for epoch in tqdm(range(num_epochs), desc='Training epochs'):
+    model.train()
     running_loss = 0.0
     total = 0
     total_angle_error = 0.0
-    
-    for images, labels in dataloader:
+
+    for images, labels in tqdm(dataloader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=False):
         images = images.float()
         labels = labels.float()
         
